@@ -8,13 +8,19 @@ A self-contained **Databricks Asset Bundle (DAB)** that deploys a fully paramete
 
 ## What It Does
 
-```
-PostgreSQL CDF History Tables          Delta Lakehouse (Current State)
-┌──────────────────────────┐        ┌─────────────────────────┐
-│ lb_*_history tables        │  CDC   │ Clean current-state tables  │
-│ (insert/update/delete      │ MERGE  │ (deduplicated, no CDC meta, │
-│  events with _pg_lsn)      │ ────▶ │  watermark-tracked)         │
-└──────────────────────────┘        └─────────────────────────┘
+```mermaid
+architecture-beta
+    group source(database)[Lakebase CDF Source]
+    group lakehouse(cloud)[Delta Lakehouse]
+
+    service history(database)[CDF history tables] in source
+    service validate(server)[Pre flight validation] in lakehouse
+    service pipeline(server)[CDC merge pipeline] in lakehouse
+    service current(database)[Current state tables] in lakehouse
+
+    history:R --> L:pipeline
+    pipeline:R --> L:current
+    history:B --> T:validate
 ```
 
 1. **Discovers** all `{prefix}*{suffix}` CDF tables dynamically from `information_schema` (no hardcoded table list)
@@ -28,18 +34,19 @@ PostgreSQL CDF History Tables          Delta Lakehouse (Current State)
 
 ## Project Structure
 
-```
-lakebase-cdf-pipeline/
-├── databricks.yml                  # Bundle config: variables, 5 targets
-├── resources/
-│   ├── lakebase_cdf_job.yml        # Pipeline job: task, compute, schedule, retry
-│   └── validate_job.yml            # Native pre-flight validation job
-├── src/
-│   ├── lakebase_cdf_pipeline.py    # Pipeline notebook (8 cells, 14 params)
-│   └── validate_bundle.py          # Validation notebook (Spark SQL checks)
-├── .gitignore                      # Ignore .bundle/, .databricks/, etc.
-├── LICENSE                         # Internal-use license
-└── README.md                       # This file
+```mermaid
+treeView-beta
+    lakebase-cdf-pipeline/
+        databricks.yml ## bundle config: variables + 5 targets
+        resources/
+            lakebase_cdf_job.yml ## pipeline job (compute, schedule, retry)
+            validate_job.yml ## native pre-flight validation job
+        src/
+            lakebase_cdf_pipeline.py ## generic CDC merge notebook (8 cells, 14 params)
+            validate_bundle.py ## workspace precondition checks
+        .gitignore ## ignores .bundle/ and .databricks/
+        LICENSE ## internal-use license
+        README.md ## this file
 ```
 
 ---
@@ -176,11 +183,16 @@ schema and it builds the pipeline. At run time the pipeline:
    (e.g. `lb_sessions_history` → `sessions`).
 3. **Resolves each table's primary key generically** — no per-table logic:
 
-   | Order | Source of the key | Notes |
-   | ----- | ----------------- | ----- |
-   | 1 | UC `PRIMARY KEY` constraint | Authoritative; supports composite keys |
-   | 2 | The `primary_key_col` default (`id`) | Used only if that column exists on the table |
-   | 3 | _(none)_ | Table is **skipped** and reported — can't merge without a key |
+```mermaid
+flowchart TD
+    T[Discovered source table] --> C{UC PRIMARY KEY constraint?}
+    C -->|yes| U[Use constraint columns<br/>composite keys supported]
+    C -->|no| D{Has default primary_key_col?}
+    D -->|yes| K[Use default key column]
+    D -->|no| S[Skip table and warn<br/>ACTION NEEDED: declare a UC PK]
+    U --> M[Merge into current-state]
+    K --> M
+```
 
 To **include a table**, make sure it matches the prefix/suffix and has a
 resolvable key: either declare a UC primary key —
@@ -197,19 +209,23 @@ redeploy is only needed if you change bundle variables.
 
 ## How the CDC Merge Works
 
+```mermaid
+flowchart TD
+    A[Source _history table] --> B{Incremental mode?}
+    B -->|yes| C[Filter _pg_lsn &gt; watermark]
+    B -->|no| D[Read all rows]
+    C --> E[Dedup per primary key<br/>keep latest by _sort_by]
+    D --> E
+    E --> F{_pg_change_type}
+    F -->|insert / update| G[Strip CDC metadata cols<br/>add audit columns]
+    F -->|delete| H[Mark for delete]
+    G --> I[Delta MERGE into target]
+    H --> I
+    I --> J[(Current-state Delta table)]
 ```
-Source _history table
-    │
-    ├─ 1. Filter by watermark (_pg_lsn > last processed)
-    ├─ 2. Deduplicate per PK (keep highest _sort_by)
-    ├─ 3. Split: upserts (insert/update) vs deletes
-    ├─ 4. Strip 5 CDC metadata columns, add 2 audit columns
-    │
-    └─ 5. Delta MERGE into target
-         ├─ MATCHED + delete  → DELETE row
-         ├─ MATCHED + upsert  → UPDATE SET *
-         └─ NOT MATCHED       → INSERT *
-```
+
+The MERGE resolves each source row against the target by primary key: matched +
+delete → `DELETE`, matched + upsert → `UPDATE SET *`, not matched → `INSERT *`.
 
 **Supported change types:**
 
