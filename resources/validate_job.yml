@@ -1,0 +1,61 @@
+# =============================================================================
+# Bundle Pre-Flight Validation Job
+#
+# Databricks-native validation: runs src/validate_bundle.py on serverless to
+# check the live workspace preconditions the CDF pipeline depends on (source
+# tables, CDC schema contract, target reachability). The run FAILS on any
+# problem, so it acts as a native CI gate.
+#
+# Manual by default (no schedule) — run it on demand before deploying/running
+# the pipeline, or add a `schedule:` block to run it periodically.
+#
+#   databricks bundle run bundle_validate_job --target <target>
+# =============================================================================
+
+resources:
+  jobs:
+    bundle_validate_job:
+      name: "[${bundle.target}] Lakebase CDF Validation"
+      description: |
+        Pre-flight validation for the Lakebase CDF pipeline. Verifies source
+        tables in ${var.source_catalog}.${var.source_schema} honor the CDC
+        schema contract and that ${var.target_catalog} is reachable.
+
+      tasks:
+        - task_key: validate_preconditions
+          notebook_task:
+            notebook_path: ../src/validate_bundle.py
+            source: WORKSPACE
+            base_parameters:
+              # --- Wired from bundle variables (target-specific) ---
+              source_catalog:     ${var.source_catalog}
+              source_schema:      ${var.source_schema}
+              target_catalog:     ${var.target_catalog}
+              target_schema:      ${var.target_schema}
+              table_prefix:       ${var.table_prefix}
+              table_suffix:       ${var.table_suffix}
+              # --- Fixed CDC schema contract (must match the pipeline) ---
+              pg_change_type_col: _pg_change_type
+              pg_lsn_col:         _pg_lsn
+              sort_by_col:        _sort_by
+              timestamp_col:      _timestamp
+              primary_key_col:    id
+          environment_key: default
+          # Validation should surface failures immediately, not retry.
+          max_retries: 0
+
+      environments:
+        - environment_key: default
+          spec:
+            client: "1"
+
+      # Alerts reuse the same complex variable as the pipeline (defaults to {}).
+      email_notifications: ${var.email_notifications}
+
+      max_concurrent_runs: 1
+      timeout_seconds: 1800  # 30 min hard cap
+
+      tags:
+        project: lakebase-cdf-pipeline
+        team: data-engineering
+        role: validation

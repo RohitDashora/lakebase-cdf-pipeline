@@ -32,12 +32,11 @@ PostgreSQL CDF History Tables          Delta Lakehouse (Current State)
 lakebase-cdf-pipeline/
 ├── databricks.yml                  # Bundle config: variables, 5 targets
 ├── resources/
-│   └── lakebase_cdf_job.yml        # Job: task, compute, schedule, retry
+│   ├── lakebase_cdf_job.yml        # Pipeline job: task, compute, schedule, retry
+│   └── validate_job.yml            # Native pre-flight validation job
 ├── src/
-│   └── lakebase_cdf_pipeline.py    # Pipeline notebook (8 cells, 13 params)
-├── .github/
-│   └── workflows/
-│       └── validate.yml            # CI: lint + bundle validate on push/PR
+│   ├── lakebase_cdf_pipeline.py    # Pipeline notebook (8 cells, 13 params)
+│   └── validate_bundle.py          # Validation notebook (Spark SQL checks)
 ├── .gitignore                      # Ignore .bundle/, .databricks/, etc.
 ├── LICENSE                         # Internal-use license
 └── README.md                       # This file
@@ -74,8 +73,9 @@ databricks bundle run lakebase_cdf_pipeline_job --target dev
 ```
 
 The deploy command creates:
-- A notebook synced to the workspace
+- Both notebooks synced to the workspace
 - A `[dev] Lakebase CDF Pipeline` job with all 13 parameters
+- A `[dev] Lakebase CDF Validation` job for native pre-flight checks (see [Native Validation](#native-validation))
 - Serverless compute, schedule, retry policy, and tags
 
 ---
@@ -233,30 +233,40 @@ databricks auth login --host https://different-workspace.cloud.databricks.com
 databricks bundle deploy --target prod-scheduled
 ```
 
-### CI/CD Integration
+### Native Validation
 
-This repo ships a GitHub Actions workflow (`.github/workflows/validate.yml`) that:
+Validation is **Databricks-native** — it runs on the same serverless compute as
+the pipeline, no external CI runner required. The bundle ships a second job,
+`bundle_validate_job` (`resources/validate_job.yml` → `src/validate_bundle.py`),
+that checks the live preconditions the pipeline depends on and **fails the run**
+on any problem, so it works as a native CI gate.
 
-- **Lints** the notebook (Python syntax) and bundle YAML on every push and PR — no credentials required.
-- **Validates** all five bundle targets with `databricks bundle validate` — runs only when the repo has `DATABRICKS_HOST` and `DATABRICKS_TOKEN` secrets set (skipped cleanly otherwise).
+It validates:
 
-To enable the validate job, add two repository secrets (Settings → Secrets and variables → Actions):
+1. Source catalog / schema are reachable
+2. At least one `{prefix}*{suffix}` CDF history table is discoverable
+3. Each discovered table honors the **CDC schema contract** — `_pg_change_type`
+   is a string, `_pg_lsn` and `_sort_by` are integral (required for the numeric
+   watermark comparison), `_timestamp` is a timestamp, and the primary key exists
+4. The target catalog is reachable (and whether the target schema already exists)
 
-| Secret             | Value                                            |
-| ------------------ | ------------------------------------------------ |
-| `DATABRICKS_HOST`  | `https://<your-workspace>.cloud.databricks.com`  |
-| `DATABRICKS_TOKEN` | A workspace personal access token                |
-
-To deploy from CI, extend the workflow with a deploy step:
-
-```yaml
-- name: Deploy Pipeline
-  run: databricks bundle deploy --target prod-scheduled
+```bash
+# Validate the deployed target's preconditions (deploy once, then run)
+databricks bundle deploy --target dev
+databricks bundle run bundle_validate_job --target dev
 ```
 
+Run it before deploying/running the pipeline for real, or add a `schedule:` block
+to `resources/validate_job.yml` to run it periodically. A failed run means a
+precondition is broken (missing table, schema drift, unreachable target).
+
+> **Two layers of validation.** `databricks bundle validate` is a fast,
+> client-side check of the bundle *config* (run it locally before deploy); the
+> `bundle_validate_job` above checks the live *workspace and data* preconditions
+> from inside Databricks.
+
 Failure-alert recipients are configured in the target's `email_notifications`
-block in `databricks.yml` (see [Enabling Failure Alerts](#enabling-failure-alerts)),
-not via `--var`.
+block in `databricks.yml` (see [Enabling Failure Alerts](#enabling-failure-alerts)).
 
 ---
 
