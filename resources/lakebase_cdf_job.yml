@@ -48,6 +48,8 @@ resources:
               pg_lsn_col:             _pg_lsn
               sort_by_col:            _sort_by
               timestamp_col:          _timestamp
+              # Default key column, used only when a table has no UC PRIMARY KEY
+              primary_key_col:        ${var.primary_key_col}
               log_level:              INFO
           environment_key: default
           # Retry on transient failures (important for continuous mode)

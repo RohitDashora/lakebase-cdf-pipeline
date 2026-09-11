@@ -52,6 +52,11 @@ variables:
     description: "Naming suffix on source CDF history tables"
     default: _history
 
+  # Primary key
+  primary_key_col:
+    description: "Default key column, used ONLY when a table has no UC PRIMARY KEY constraint"
+    default: id
+
   # Processing behavior
   processing_mode:
     description: "'incremental' (watermark-based) or 'full' (reprocess all)"
@@ -124,6 +129,8 @@ targets:
       target_schema: lakebase_benchmarks_staging
       processing_mode: incremental
       schedule_cron: "0 0 */4 * * ?"  # every 4 hours
+      # geniefy_sync CDF tables use the `lb_` prefix (not the default lb_s1tnt1_)
+      table_prefix: lb_
 
   # --- Production: cron schedule ------------------------------------------
   prod-scheduled:

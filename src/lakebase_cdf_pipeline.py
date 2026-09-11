@@ -3,16 +3,23 @@
 # MAGIC %md
 # MAGIC # PostgreSQL CDF → Delta Lakehouse Pipeline
 # MAGIC
-# MAGIC A fully parameterized PySpark pipeline that reads PostgreSQL Change Data Feed (CDF)
-# MAGIC history tables and applies CDC merge logic to produce clean, current-state Delta tables.
+# MAGIC A fully generic, parameterized PySpark pipeline that reads PostgreSQL /
+# MAGIC Lakebase Change Data Feed (CDF) history tables and applies CDC merge logic
+# MAGIC to produce clean, current-state Delta tables.
 # MAGIC
-# MAGIC **Key Features:**
-# MAGIC - Incremental or full processing modes via `_pg_lsn` watermarking
+# MAGIC **Point it at any Lakebase CDF schema and it builds the pipeline** — there
+# MAGIC is no table-specific logic. Tables are discovered by pattern and each
+# MAGIC table's primary key is resolved generically:
+# MAGIC 1. UC-declared `PRIMARY KEY` constraint (authoritative), else
+# MAGIC 2. the configurable default key column (`primary_key_col`, default `id`)
+# MAGIC    if that column exists on the table, else
+# MAGIC 3. the table is **skipped** and reported (no key → can't merge safely).
+# MAGIC
+# MAGIC **Other features:**
+# MAGIC - Incremental or full processing via `_pg_lsn` watermarking (numeric)
 # MAGIC - Automatic deduplication of CDC events per primary key
-# MAGIC - Delta MERGE with insert, update, and delete handling
+# MAGIC - Delta MERGE with insert, update, and delete handling (composite keys OK)
 # MAGIC - Per-table error isolation — one table's failure won't stop the rest
-# MAGIC - Configurable via Databricks widgets / job parameters
-# MAGIC - Dynamic table discovery from information_schema
 
 # COMMAND ----------
 
@@ -39,6 +46,10 @@ dbutils.widgets.text("pg_lsn_col", "_pg_lsn", "PG LSN Column")
 dbutils.widgets.text("sort_by_col", "_sort_by", "Sort By Column")
 dbutils.widgets.text("timestamp_col", "_timestamp", "Timestamp Column")
 
+# Default primary key column, used ONLY when a table has no UC PRIMARY KEY
+# constraint. This is a uniform convention, not per-table logic.
+dbutils.widgets.text("primary_key_col", "id", "Default Primary Key Column")
+
 # Processing options
 dbutils.widgets.dropdown("processing_mode", "incremental", ["full", "incremental"], "Processing Mode")
 dbutils.widgets.dropdown("enable_delete_handling", "true", ["true", "false"], "Enable Delete Handling")
@@ -48,9 +59,9 @@ print("✓ All widgets created successfully")
 
 # COMMAND ----------
 
-# DBTITLE 1,Configuration & Table Registry
+# DBTITLE 1,Configuration
 # ---------------------------------------------------------------------------
-# Configuration & Table Registry
+# Configuration
 # ---------------------------------------------------------------------------
 
 config = {
@@ -64,44 +75,23 @@ config = {
     "pg_lsn_col": dbutils.widgets.get("pg_lsn_col"),
     "sort_by_col": dbutils.widgets.get("sort_by_col"),
     "timestamp_col": dbutils.widgets.get("timestamp_col"),
+    "primary_key_col": dbutils.widgets.get("primary_key_col"),
     "processing_mode": dbutils.widgets.get("processing_mode"),
     "enable_delete_handling": dbutils.widgets.get("enable_delete_handling") == "true",
     "log_level": dbutils.widgets.get("log_level"),
 }
 
 # CDC metadata columns to exclude from target tables
-CDC_META_COLS = ["_pg_change_type", "_pg_lsn", "_pg_xid", "_timestamp", "_sort_by"]
-
-# ---------------------------------------------------------------------------
-# Table Registry: entity_name -> metadata
-#
-# This registry is auto-populated from discovered source tables.
-# Override or extend it here to add custom primary keys or skip entities.
-# ---------------------------------------------------------------------------
-TABLE_REGISTRY = {
-    "profile":              {"primary_keys": ["id"]},
-    "contactpointaddress":  {"primary_keys": ["id"]},
-    "contactpointemail":    {"primary_keys": ["id"]},
-    "contactpointphone":    {"primary_keys": ["id"]},
-    "contactpointsocial":   {"primary_keys": ["id"]},
-    "education":            {"primary_keys": ["id"]},
-    "interest":             {"primary_keys": ["id"]},
-    "preference":           {"primary_keys": ["id"]},
-    "subscription":         {"primary_keys": ["id"]},
-    "alternatekey":         {"primary_keys": ["id"]},
-}
-
-# Build fully qualified table names
-for entity_name, meta in TABLE_REGISTRY.items():
-    src = f"{config['source_catalog']}.{config['source_schema']}.{config['table_prefix']}{entity_name}{config['table_suffix']}"
-    tgt = f"{config['target_catalog']}.{config['target_schema']}.{entity_name}"
-    meta["source_table"] = src
-    meta["target_table"] = tgt
+CDC_META_COLS = [
+    config["pg_change_type_col"], config["pg_lsn_col"], "_pg_xid",
+    config["timestamp_col"], config["sort_by_col"],
+]
 
 print(f"✓ Configuration loaded | Mode: {config['processing_mode']} | Delete handling: {config['enable_delete_handling']}")
-print(f"✓ Table Registry: {len(TABLE_REGISTRY)} entities registered")
-for name, meta in TABLE_REGISTRY.items():
-    print(f"  {name}: {meta['source_table']} → {meta['target_table']}")
+print(f"  Source: {config['source_catalog']}.{config['source_schema']} "
+      f"(tables '{config['table_prefix']}*{config['table_suffix']}')")
+print(f"  Target: {config['target_catalog']}.{config['target_schema']}")
+print(f"  Default PK column (fallback): {config['primary_key_col']}")
 
 # COMMAND ----------
 
@@ -216,6 +206,48 @@ def get_entity_name(table_name, table_prefix, table_suffix):
     if name.endswith(table_suffix):
         name = name[:-len(table_suffix)]
     return name
+
+
+def get_primary_keys(spark, catalog, schema, table_name, default_pk_col):
+    """Resolve a table's primary key GENERICALLY — no table-specific logic.
+
+    Order of precedence:
+      1. UC-declared PRIMARY KEY constraint (authoritative for Lakebase-managed
+         tables) — supports composite keys, returned in ordinal order.
+      2. The configurable default key column (`primary_key_col`) if it exists on
+         the table — a uniform convention, applied to every table equally.
+      3. [] — no key could be determined; caller should skip the table.
+
+    Returns (primary_keys: list[str], source: str).
+    """
+    # 1. UC primary key constraint
+    q = f"""
+    SELECT kcu.column_name
+    FROM {catalog}.information_schema.table_constraints tc
+    JOIN {catalog}.information_schema.key_column_usage kcu
+      ON  tc.constraint_catalog = kcu.constraint_catalog
+      AND tc.constraint_schema  = kcu.constraint_schema
+      AND tc.constraint_name    = kcu.constraint_name
+    WHERE tc.table_schema = '{schema}'
+      AND tc.table_name   = '{table_name}'
+      AND tc.constraint_type = 'PRIMARY KEY'
+    ORDER BY kcu.ordinal_position
+    """
+    try:
+        pk_cols = [r.column_name for r in spark.sql(q).collect()]
+    except Exception as e:
+        logger.debug(f"Constraint lookup failed for {table_name}: {e}")
+        pk_cols = []
+    if pk_cols:
+        return pk_cols, "uc_constraint"
+
+    # 2. default key column, if present on the table
+    cols = [f.name.lower() for f in spark.table(f"{catalog}.{schema}.{table_name}").schema.fields]
+    if default_pk_col.lower() in cols:
+        return [default_pk_col], "default_column"
+
+    # 3. undeterminable
+    return [], "none"
 
 
 def get_latest_watermark(spark, target_table, lsn_col="_last_pg_lsn"):
@@ -398,11 +430,41 @@ print("✓ Core CDC merge function defined")
 # DBTITLE 1,Main Pipeline Orchestrator
 # ---------------------------------------------------------------------------
 # Main Pipeline Orchestrator
+#
+# Builds a plan by DISCOVERING every source table and resolving its primary key
+# generically. No table names or per-table logic anywhere.
 # ---------------------------------------------------------------------------
+
+# Populated by build_plan(); reused by the summary cell.
+PIPELINE_PLAN = []
+
+
+def build_plan():
+    """Discover source tables and resolve each one's primary key generically."""
+    tables = get_source_tables(
+        spark, config["source_catalog"], config["source_schema"],
+        config["table_prefix"], config["table_suffix"],
+    )
+    plan = []
+    for table_name in tables:
+        entity_name = get_entity_name(table_name, config["table_prefix"], config["table_suffix"])
+        pks, pk_source = get_primary_keys(
+            spark, config["source_catalog"], config["source_schema"],
+            table_name, config["primary_key_col"],
+        )
+        plan.append({
+            "entity_name": entity_name,
+            "source_table": f"{config['source_catalog']}.{config['source_schema']}.{table_name}",
+            "target_table": f"{config['target_catalog']}.{config['target_schema']}.{entity_name}",
+            "primary_keys": pks,
+            "pk_source": pk_source,
+        })
+    return plan
 
 
 def run_pipeline():
-    """Orchestrate the full CDC merge pipeline across all registered tables."""
+    """Orchestrate the full CDC merge pipeline across all discovered tables."""
+    global PIPELINE_PLAN
     logger.info("=" * 70)
     logger.info("STARTING CDF → Delta Pipeline")
     logger.info(f"Mode: {config['processing_mode']} | Delete handling: {config['enable_delete_handling']}")
@@ -411,34 +473,35 @@ def run_pipeline():
     # 1. Ensure target schema exists
     ensure_target_schema(spark, config["target_catalog"], config["target_schema"])
 
-    # 2. Discover source tables
-    discovered_tables = get_source_tables(
-        spark,
-        config["source_catalog"],
-        config["source_schema"],
-        config["table_prefix"],
-        config["table_suffix"],
-    )
-    logger.info(f"Discovered {len(discovered_tables)} source tables")
+    # 2. Discover source tables and resolve keys
+    PIPELINE_PLAN = build_plan()
+    logger.info(f"Planned {len(PIPELINE_PLAN)} discovered source tables")
 
-    # 3. Process each registered table
-    for entity_name, meta in TABLE_REGISTRY.items():
+    # 3. Process each discovered table
+    for item in PIPELINE_PLAN:
+        entity_name = item["entity_name"]
+        source_table = item["source_table"]
+        target_table = item["target_table"]
+        primary_keys = item["primary_keys"]
         table_start = time.time()
-        source_table = meta["source_table"]
-        target_table = meta["target_table"]
 
-        expected_source_name = f"{config['table_prefix']}{entity_name}{config['table_suffix']}"
-        if expected_source_name not in discovered_tables:
-            logger.warning(f"Source table '{expected_source_name}' not found; skipping {entity_name}")
+        # Skip tables with no resolvable primary key — cannot merge safely.
+        if not primary_keys:
+            logger.warning(
+                f"No primary key for {source_table} (no UC PRIMARY KEY constraint and "
+                f"no '{config['primary_key_col']}' column); skipping {entity_name}. "
+                f"Add a UC PRIMARY KEY constraint to include it."
+            )
             metrics.record_table(
                 entity_name, status="skipped",
-                error_msg=f"Source table not found: {expected_source_name}",
+                error_msg="No resolvable primary key",
                 duration_sec=time.time() - table_start,
             )
             continue
 
         try:
-            logger.info(f"Processing: {entity_name} ({source_table} → {target_table})")
+            logger.info(f"Processing: {entity_name} ({source_table} → {target_table}) "
+                        f"| PK {primary_keys} via {item['pk_source']}")
 
             watermark = 0
             if config["processing_mode"] == "incremental":
@@ -449,7 +512,7 @@ def run_pipeline():
                 spark=spark,
                 source_table=source_table,
                 target_table=target_table,
-                primary_keys=meta["primary_keys"],
+                primary_keys=primary_keys,
                 cdc_meta_cols=CDC_META_COLS,
                 pg_change_type_col=config["pg_change_type_col"],
                 pg_lsn_col=config["pg_lsn_col"],
@@ -514,9 +577,10 @@ print("Per-Table Pipeline Metrics:")
 display(metrics.summary_df())
 
 comparison_rows = []
-for entity_name, meta in TABLE_REGISTRY.items():
-    source_table = meta["source_table"]
-    target_table = meta["target_table"]
+for item in PIPELINE_PLAN:
+    source_table = item["source_table"]
+    target_table = item["target_table"]
+    primary_keys = item["primary_keys"]
     try:
         src_count = spark.table(source_table).count()
     except Exception:
@@ -526,12 +590,17 @@ for entity_name, meta in TABLE_REGISTRY.items():
     except Exception:
         tgt_count = -1
     try:
-        src_distinct_pks = spark.table(source_table).select("id").distinct().count()
+        # distinct on the resolved primary key(s) — generic, no hardcoded column
+        src_distinct_pks = spark.table(source_table).select(*primary_keys).distinct().count() if primary_keys else -1
     except Exception:
         src_distinct_pks = -1
-    comparison_rows.append((entity_name, source_table, target_table, src_count, src_distinct_pks, tgt_count))
+    comparison_rows.append((
+        item["entity_name"], source_table, target_table,
+        ",".join(primary_keys) if primary_keys else "(none)",
+        src_count, src_distinct_pks, tgt_count,
+    ))
 
-comparison_schema = "entity STRING, source_table STRING, target_table STRING, source_total_rows LONG, source_distinct_pks LONG, target_rows LONG"
+comparison_schema = "entity STRING, source_table STRING, target_table STRING, primary_keys STRING, source_total_rows LONG, source_distinct_pks LONG, target_rows LONG"
 comparison_df = spark.createDataFrame(comparison_rows, comparison_schema)
 
 print("\nSource vs Target Row Count Comparison:")

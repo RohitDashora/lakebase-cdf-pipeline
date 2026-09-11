@@ -17,7 +17,7 @@ PostgreSQL CDF History Tables          Delta Lakehouse (Current State)
 └──────────────────────────┘        └─────────────────────────┘
 ```
 
-1. **Discovers** all `lb_*_history` CDF tables dynamically from `information_schema`
+1. **Discovers** all `{prefix}*{suffix}` CDF tables dynamically from `information_schema` (no hardcoded table list)
 2. **Deduplicates** CDC events per primary key (keeps latest by `_sort_by`)
 3. **Applies** INSERT / UPDATE / DELETE via Delta MERGE
 4. **Tracks** watermarks (`_pg_lsn`) for efficient incremental processing
@@ -35,7 +35,7 @@ lakebase-cdf-pipeline/
 │   ├── lakebase_cdf_job.yml        # Pipeline job: task, compute, schedule, retry
 │   └── validate_job.yml            # Native pre-flight validation job
 ├── src/
-│   ├── lakebase_cdf_pipeline.py    # Pipeline notebook (8 cells, 13 params)
+│   ├── lakebase_cdf_pipeline.py    # Pipeline notebook (8 cells, 14 params)
 │   └── validate_bundle.py          # Validation notebook (Spark SQL checks)
 ├── .gitignore                      # Ignore .bundle/, .databricks/, etc.
 ├── LICENSE                         # Internal-use license
@@ -74,7 +74,7 @@ databricks bundle run lakebase_cdf_pipeline_job --target dev
 
 The deploy command creates:
 - Both notebooks synced to the workspace
-- A `[dev] Lakebase CDF Pipeline` job with all 13 parameters
+- A `[dev] Lakebase CDF Pipeline` job with all 14 parameters
 - A `[dev] Lakebase CDF Validation` job for native pre-flight checks (see [Native Validation](#native-validation))
 - Serverless compute, schedule, retry policy, and tags
 
@@ -142,6 +142,7 @@ databricks bundle run lakebase_cdf_pipeline_job --target prod-scheduled \
 | `target_schema`          | `lakebase_benchmarks_current` | Output schema (created if missing)                  |
 | `table_prefix`           | `lb_s1tnt1_`                  | Source table naming prefix                          |
 | `table_suffix`           | `_history`                    | Source table naming suffix                          |
+| `primary_key_col`        | `id`                          | Default key column when a table has no UC PRIMARY KEY |
 | `processing_mode`        | `incremental`                 | `incremental` (watermark) or `full` (reprocess all) |
 | `enable_delete_handling` | `true`                        | Apply DELETE CDC operations to target               |
 | `schedule_cron`          | `0 0 */2 * * ?`               | Quartz cron (schedule-based targets only)           |
@@ -164,33 +165,33 @@ targets:
 
 ---
 
-## Source Tables (Default)
+## Table Discovery & Primary Keys
 
-| Entity              | Source History Table                      | Target Table          |
-| ------------------- | ----------------------------------------- | --------------------- |
-| profile             | `lb_s1tnt1_profile_history`               | `profile`             |
-| contactpointaddress | `lb_s1tnt1_contactpointaddress_history`   | `contactpointaddress` |
-| contactpointemail   | `lb_s1tnt1_contactpointemail_history`     | `contactpointemail`   |
-| contactpointphone   | `lb_s1tnt1_contactpointphone_history`     | `contactpointphone`   |
-| contactpointsocial  | `lb_s1tnt1_contactpointsocial_history`    | `contactpointsocial`  |
-| education           | `lb_s1tnt1_education_history`             | `education`           |
-| interest            | `lb_s1tnt1_interest_history`              | `interest`            |
-| preference          | `lb_s1tnt1_preference_history`            | `preference`          |
-| subscription        | `lb_s1tnt1_subscription_history`          | `subscription`        |
-| alternatekey        | `lb_s1tnt1_alternatekey_history`          | `alternatekey`        |
+There is **no hardcoded table list** — point the bundle at any Lakebase CDF
+schema and it builds the pipeline. At run time the pipeline:
 
----
+1. **Discovers** every table matching `{table_prefix}*{table_suffix}` in the
+   source schema (via `information_schema`).
+2. Derives each target table's name by stripping the prefix/suffix
+   (e.g. `lb_sessions_history` → `sessions`).
+3. **Resolves each table's primary key generically** — no per-table logic:
 
-## Adding New Tables
+   | Order | Source of the key | Notes |
+   | ----- | ----------------- | ----- |
+   | 1 | UC `PRIMARY KEY` constraint | Authoritative; supports composite keys |
+   | 2 | The `primary_key_col` default (`id`) | Used only if that column exists on the table |
+   | 3 | _(none)_ | Table is **skipped** and reported — can't merge without a key |
 
-1. Create the CDF history table following `{table_prefix}{entity}{table_suffix}` naming
-2. Add to `TABLE_REGISTRY` in `src/lakebase_cdf_pipeline.py`:
-   ```python
-   "new_entity": {"primary_keys": ["id"]},
-   ```
-3. Redeploy: `databricks bundle deploy --target <target>`
+To **include a table**, make sure it matches the prefix/suffix and has a
+resolvable key: either declare a UC primary key —
 
-The pipeline discovers tables dynamically — any table matching the prefix/suffix pattern is picked up.
+```sql
+ALTER TABLE <catalog>.<schema>.<prefix><entity><suffix>
+  ADD CONSTRAINT <entity>_pk PRIMARY KEY (<col> [, <col> ...]);
+```
+
+— or ensure it has the default `primary_key_col` column. Nothing else to edit;
+redeploy is only needed if you change bundle variables.
 
 ---
 
@@ -233,9 +234,16 @@ Change `table_prefix` to match your naming convention:
 databricks bundle deploy --target dev --var table_prefix=myprefix_
 ```
 
-### Use a Different Primary Key
+### Change How Primary Keys Are Resolved
 
-Edit `TABLE_REGISTRY` in the notebook — each entity can have its own `primary_keys` list.
+Keys are resolved per table (UC constraint → `primary_key_col` default → skip),
+so there's nothing table-specific to edit. To key a table differently, declare a
+UC `PRIMARY KEY` constraint on it (wins over the default). To change the default
+key column used when no constraint exists:
+
+```bash
+databricks bundle deploy --target dev --var primary_key_col=my_id_col
+```
 
 ### Point to a Different Workspace
 
