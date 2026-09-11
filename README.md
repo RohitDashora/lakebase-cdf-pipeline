@@ -45,7 +45,6 @@ treeView-beta
             lakebase_cdf_pipeline.py ## generic CDC merge notebook (8 cells, 14 params)
             validate_bundle.py ## workspace precondition checks
         .gitignore ## ignores .bundle/ and .databricks/
-        LICENSE ## internal-use license
         README.md ## this file
 ```
 
@@ -302,9 +301,3 @@ precondition is broken (missing table, schema drift, unreachable target).
 
 Failure-alert recipients are configured in the target's `email_notifications`
 block in `databricks.yml` (see [Enabling Failure Alerts](#enabling-failure-alerts)).
-
----
-
-## License
-
-Internal use. Modify freely for your organization.
