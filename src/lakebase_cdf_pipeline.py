@@ -123,6 +123,7 @@ class PipelineMetrics:
         self.total_rows_updated = 0
         self.total_rows_deleted = 0
         self.errors = []
+        self.no_key_tables = []
         self.table_metrics = OrderedDict()
 
     def record_table(self, entity_name, rows_inserted=0, rows_updated=0, rows_deleted=0,
@@ -141,8 +142,10 @@ class PipelineMetrics:
             self.total_rows_inserted += rows_inserted
             self.total_rows_updated += rows_updated
             self.total_rows_deleted += rows_deleted
-        elif status == "skipped":
+        elif status in ("skipped", "no_primary_key"):
             self.tables_skipped += 1
+            if status == "no_primary_key":
+                self.no_key_tables.append(entity_name)
         else:
             self.errors.append({"table": entity_name, "error": error_msg})
 
@@ -162,6 +165,11 @@ class PipelineMetrics:
         print(f"PIPELINE SUMMARY  |  Elapsed: {elapsed}s")
         print(f"  Tables processed: {self.tables_processed}  |  Skipped: {self.tables_skipped}  |  Errors: {len(self.errors)}")
         print(f"  Rows inserted: {self.total_rows_inserted}  |  Updated: {self.total_rows_updated}  |  Deleted: {self.total_rows_deleted}")
+        if self.no_key_tables:
+            print(f"  ⚠ ACTION NEEDED — {len(self.no_key_tables)} table(s) skipped: no resolvable primary key.")
+            print("    Declare a UC PRIMARY KEY constraint on each to include it:")
+            for t in self.no_key_tables:
+                print(f"      - {t}")
         if self.errors:
             print("  ERRORS:")
             for e in self.errors:
@@ -486,15 +494,16 @@ def run_pipeline():
         table_start = time.time()
 
         # Skip tables with no resolvable primary key — cannot merge safely.
+        # Generic behavior: no table-specific logic; report so the user can fix
+        # the source table (declare a UC PRIMARY KEY constraint on it).
         if not primary_keys:
-            logger.warning(
-                f"No primary key for {source_table} (no UC PRIMARY KEY constraint and "
-                f"no '{config['primary_key_col']}' column); skipping {entity_name}. "
-                f"Add a UC PRIMARY KEY constraint to include it."
-            )
+            msg = (f"No resolvable primary key: no UC PRIMARY KEY constraint and no "
+                   f"'{config['primary_key_col']}' column. Declare a UC PRIMARY KEY "
+                   f"constraint on {source_table} to include it.")
+            logger.warning(f"Skipping {entity_name}: {msg}")
             metrics.record_table(
-                entity_name, status="skipped",
-                error_msg="No resolvable primary key",
+                entity_name, status="no_primary_key",
+                error_msg=msg,
                 duration_sec=time.time() - table_start,
             )
             continue
