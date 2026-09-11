@@ -1,0 +1,87 @@
+# =============================================================================
+# Lakebase CDF Pipeline Job Definition
+#
+# This is the base job definition. Target-level overrides in databricks.yml
+# swap the schedule for trigger/continuous mode as needed.
+# =============================================================================
+
+resources:
+  jobs:
+    lakebase_cdf_pipeline_job:
+      name: "[${bundle.target}] Lakebase CDF Pipeline"
+      description: |
+        Reads PostgreSQL CDF history tables from ${var.source_catalog}.${var.source_schema}
+        and applies CDC merge logic to produce current-state Delta tables in
+        ${var.target_catalog}.${var.target_schema}.
+
+        Deployment target: ${bundle.target}
+        Processing mode:   ${var.processing_mode}
+
+      # -----------------------------------------------------------------------
+      # Schedule (default - overridden by prod-triggered / prod-continuous)
+      # -----------------------------------------------------------------------
+      schedule:
+        quartz_cron_expression: ${var.schedule_cron}
+        timezone_id: America/New_York
+        pause_status: PAUSED  # unpause after first successful manual run
+
+      # -----------------------------------------------------------------------
+      # Task: run the pipeline notebook on serverless
+      # -----------------------------------------------------------------------
+      tasks:
+        - task_key: run_cdf_pipeline
+          notebook_task:
+            notebook_path: ../src/lakebase_cdf_pipeline.py
+            source: WORKSPACE
+            base_parameters:
+              # --- Wired from bundle variables (target-specific) ---
+              source_catalog:         ${var.source_catalog}
+              source_schema:          ${var.source_schema}
+              target_catalog:         ${var.target_catalog}
+              target_schema:          ${var.target_schema}
+              table_prefix:           ${var.table_prefix}
+              table_suffix:           ${var.table_suffix}
+              processing_mode:        ${var.processing_mode}
+              enable_delete_handling:  ${var.enable_delete_handling}
+              # --- Fixed CDC column mappings ---
+              pg_change_type_col:     _pg_change_type
+              pg_lsn_col:             _pg_lsn
+              sort_by_col:            _sort_by
+              timestamp_col:          _timestamp
+              primary_key_col:        id
+              batch_size:             "10000"
+              log_level:              INFO
+          environment_key: default
+          # Retry on transient failures (important for continuous mode)
+          max_retries: 2
+          min_retry_interval_millis: 30000   # 30 seconds between retries
+
+      # -----------------------------------------------------------------------
+      # Serverless compute
+      # -----------------------------------------------------------------------
+      environments:
+        - environment_key: default
+          spec:
+            client: "1"
+
+      # -----------------------------------------------------------------------
+      # Notifications
+      # -----------------------------------------------------------------------
+      email_notifications:
+        on_failure:
+          - ${var.notification_email}
+
+      # -----------------------------------------------------------------------
+      # Concurrency & timeout
+      # -----------------------------------------------------------------------
+      max_concurrent_runs: 1
+      timeout_seconds: 7200  # 2 hour hard cap (overridden to 0 for continuous)
+
+      # -----------------------------------------------------------------------
+      # Metadata
+      # -----------------------------------------------------------------------
+      tags:
+        project: lakebase-cdf-pipeline
+        team: data-engineering
+        source_schema: ${var.source_schema}
+        target_schema: ${var.target_schema}

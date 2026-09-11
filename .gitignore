@@ -1,0 +1,30 @@
+# Databricks Bundle artifacts
+.databricks/
+.bundle/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Secrets - NEVER commit
+.env
+.env.*
+*.pem
+*.key

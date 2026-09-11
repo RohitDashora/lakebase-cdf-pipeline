@@ -1,0 +1,142 @@
+# =============================================================================
+# Lakebase PostgreSQL CDF → Delta Lakehouse Pipeline
+# Databricks Asset Bundle (DAB) Configuration
+# =============================================================================
+#
+# This bundle is a self-contained, deployable unit. Anyone can clone it,
+# set their parameters, and deploy a fully working pipeline.
+#
+# DEPLOY:
+#   databricks bundle deploy --target <target>
+#
+# RUN:
+#   databricks bundle run lakebase_cdf_pipeline_job --target <target>
+#
+# TARGETS (pick one):
+#   dev              - Development: full reprocess, daily schedule, paused
+#   staging          - Staging: incremental, every 4 hours, paused
+#   prod-scheduled   - Production: incremental, every 2 hours via cron
+#   prod-triggered   - Production: incremental, every 1 hour via periodic trigger
+#   prod-continuous  - Production: incremental, runs continuously (restarts on completion)
+#
+# =============================================================================
+
+bundle:
+  name: lakebase-cdf-pipeline
+
+# ---------------------------------------------------------------------------
+# Variables: override per target or at deploy time with --var
+# ---------------------------------------------------------------------------
+variables:
+  # Source configuration
+  source_catalog:
+    description: "Unity Catalog catalog containing the CDF history tables"
+    default: rd_classic_catalog
+  source_schema:
+    description: "Schema containing the lb_*_history CDF source tables"
+    default: lakebase_benchmarks
+
+  # Target configuration
+  target_catalog:
+    description: "Unity Catalog catalog for the current-state target tables"
+    default: rd_classic_catalog
+  target_schema:
+    description: "Schema for the current-state target tables (created if missing)"
+    default: lakebase_benchmarks_current
+
+  # Table naming conventions
+  table_prefix:
+    description: "Naming prefix on source CDF history tables (e.g. lb_s1tnt1_)"
+    default: lb_s1tnt1_
+  table_suffix:
+    description: "Naming suffix on source CDF history tables"
+    default: _history
+
+  # Processing behavior
+  processing_mode:
+    description: "'incremental' (watermark-based) or 'full' (reprocess all)"
+    default: incremental
+  enable_delete_handling:
+    description: "Whether to apply DELETE operations from CDC stream"
+    default: "true"
+
+  # Schedule (used by schedule-based targets only)
+  schedule_cron:
+    description: "Quartz cron expression for the pipeline schedule"
+    default: "0 0 */2 * * ?"
+
+  # Notifications
+  notification_email:
+    description: "Email address for job failure notifications (leave empty to skip)"
+    default: ""
+
+# ---------------------------------------------------------------------------
+# Include resource definitions
+# ---------------------------------------------------------------------------
+include:
+  - resources/*.yml
+
+# ---------------------------------------------------------------------------
+# Targets
+#
+# Each target creates an independent, isolated job. Deploy multiple targets
+# side-by-side — they don't conflict.
+#
+# schedule / trigger / continuous are MUTUALLY EXCLUSIVE on a job.
+# Target-level resource overrides swap them cleanly.
+# ---------------------------------------------------------------------------
+
+targets:
+  # --- Development --------------------------------------------------------
+  dev:
+    mode: development
+    default: true
+    variables:
+      target_schema: lakebase_benchmarks_dev
+      processing_mode: full
+      schedule_cron: "0 0 8 * * ?"  # daily at 8 AM ET
+
+  # --- Staging ------------------------------------------------------------
+  staging:
+    variables:
+      target_schema: lakebase_benchmarks_staging
+      processing_mode: incremental
+      schedule_cron: "0 0 */4 * * ?"  # every 4 hours
+
+  # --- Production: cron schedule ------------------------------------------
+  prod-scheduled:
+    variables:
+      target_schema: lakebase_benchmarks_current
+      processing_mode: incremental
+      schedule_cron: "0 0 */2 * * ?"  # every 2 hours
+
+  # --- Production: periodic trigger (simpler interval) --------------------
+  prod-triggered:
+    variables:
+      target_schema: lakebase_benchmarks_current
+      processing_mode: incremental
+    resources:
+      jobs:
+        lakebase_cdf_pipeline_job:
+          # Remove cron schedule, use periodic trigger instead
+          schedule: null
+          trigger:
+            periodic:
+              interval: 1
+              unit: HOURS
+            pause_status: UNPAUSED
+
+  # --- Production: continuous (always running) ----------------------------
+  prod-continuous:
+    variables:
+      target_schema: lakebase_benchmarks_current
+      processing_mode: incremental
+    resources:
+      jobs:
+        lakebase_cdf_pipeline_job:
+          # Remove cron schedule, use continuous mode
+          schedule: null
+          continuous:
+            pause_status: UNPAUSED
+          # No timeout for continuous jobs
+          timeout_seconds: 0

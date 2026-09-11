@@ -1,0 +1,65 @@
+name: Validate Bundle
+
+# Lints the source and validates the Databricks Asset Bundle configuration.
+#
+# The `lint` job runs on every push/PR and needs no credentials.
+# The `validate` job runs `databricks bundle validate` for every target and
+# only executes when the repository has the two secrets configured:
+#   - DATABRICKS_HOST   (e.g. https://your-workspace.cloud.databricks.com)
+#   - DATABRICKS_TOKEN  (a workspace personal access token)
+# Without them it is skipped cleanly rather than failing the build.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  lint:
+    name: Lint (syntax only, no credentials)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Check notebook Python syntax
+        run: python -m py_compile src/lakebase_cdf_pipeline.py
+      - name: Check bundle YAML syntax
+        run: |
+          python - <<'PY'
+          import glob, yaml
+          for f in ["databricks.yml", *glob.glob("resources/*.yml")]:
+              with open(f) as fh:
+                  yaml.safe_load(fh)
+              print(f"OK: {f}")
+          PY
+
+  validate:
+    name: Validate bundle targets
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check for Databricks credentials
+        id: creds
+        run: |
+          if [ -n "${{ secrets.DATABRICKS_HOST }}" ] && [ -n "${{ secrets.DATABRICKS_TOKEN }}" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::DATABRICKS_HOST/DATABRICKS_TOKEN secrets not set — skipping bundle validate."
+          fi
+      - uses: databricks/setup-cli@main
+        if: steps.creds.outputs.present == 'true'
+      - name: Validate all targets
+        if: steps.creds.outputs.present == 'true'
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: |
+          for target in dev staging prod-scheduled prod-triggered prod-continuous; do
+            echo "=== Validating target: $target ==="
+            databricks bundle validate --target "$target"
+          done
