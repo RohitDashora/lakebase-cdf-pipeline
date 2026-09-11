@@ -111,8 +111,16 @@ targets:
       schedule_cron: "0 0 8 * * ?"  # daily at 8 AM ET
 
   # --- Staging ------------------------------------------------------------
+  # Runs against a SEPARATE workspace (fe-vm-agent-spark), reading CDF history
+  # from rd_classic_catalog.geniefy_sync. Requires a CLI profile authenticated
+  # to that host (e.g. `databricks auth login --host
+  # https://fe-vm-agent-spark.cloud.databricks.com`).
   staging:
+    workspace:
+      host: https://fe-vm-agent-spark.cloud.databricks.com
     variables:
+      source_catalog: rd_classic_catalog
+      source_schema: geniefy_sync
       target_schema: lakebase_benchmarks_staging
       processing_mode: incremental
       schedule_cron: "0 0 */4 * * ?"  # every 4 hours

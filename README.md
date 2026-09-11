@@ -87,10 +87,21 @@ Choose a target based on how you want the pipeline to run:
 | Target               | Run Mode        | Behavior                                                            |
 | -------------------- | --------------- | ------------------------------------------------------------------- |
 | `dev`                | Cron schedule   | Full reprocess, daily at 8 AM ET, **paused** (manual trigger)       |
-| `staging`            | Cron schedule   | Incremental, every 4 hours, **paused**                              |
+| `staging`            | Cron schedule   | Incremental, every 4 hours, **paused** — separate workspace (see below) |
 | `prod-scheduled`     | Cron schedule   | Incremental, every 2 hours via quartz cron, **paused**              |
 | `prod-triggered`     | Periodic trigger| Incremental, every 1 hour via periodic trigger, **unpaused**        |
 | `prod-continuous`    | Continuous      | Incremental, restarts immediately on completion, **unpaused**       |
+
+> **`staging` targets a different workspace.** It sets `workspace.host` to
+> `https://fe-vm-agent-spark.cloud.databricks.com` and reads CDF history from
+> `rd_classic_catalog.geniefy_sync`. Deploying it needs a CLI profile
+> authenticated to that host:
+> ```bash
+> databricks auth login --host https://fe-vm-agent-spark.cloud.databricks.com --profile fe-vm-v2
+> databricks bundle validate --target staging -p fe-vm-v2
+> databricks bundle deploy   --target staging -p fe-vm-v2
+> ```
+> The other targets use whichever workspace your default/`--profile` auth points at.
 
 ### Deploy Examples
 
