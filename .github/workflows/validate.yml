@@ -24,6 +24,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      - name: Install lint dependencies
+        run: pip install pyyaml
       - name: Check notebook Python syntax
         run: python -m py_compile src/lakebase_cdf_pipeline.py
       - name: Check bundle YAML syntax
