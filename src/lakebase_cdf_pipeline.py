@@ -38,11 +38,9 @@ dbutils.widgets.text("pg_change_type_col", "_pg_change_type", "PG Change Type Co
 dbutils.widgets.text("pg_lsn_col", "_pg_lsn", "PG LSN Column")
 dbutils.widgets.text("sort_by_col", "_sort_by", "Sort By Column")
 dbutils.widgets.text("timestamp_col", "_timestamp", "Timestamp Column")
-dbutils.widgets.text("primary_key_col", "id", "Primary Key Column")
 
 # Processing options
 dbutils.widgets.dropdown("processing_mode", "incremental", ["full", "incremental"], "Processing Mode")
-dbutils.widgets.text("batch_size", "10000", "Batch Size")
 dbutils.widgets.dropdown("enable_delete_handling", "true", ["true", "false"], "Enable Delete Handling")
 dbutils.widgets.dropdown("log_level", "INFO", ["DEBUG", "INFO", "WARNING", "ERROR"], "Log Level")
 
@@ -66,9 +64,7 @@ config = {
     "pg_lsn_col": dbutils.widgets.get("pg_lsn_col"),
     "sort_by_col": dbutils.widgets.get("sort_by_col"),
     "timestamp_col": dbutils.widgets.get("timestamp_col"),
-    "primary_key_col": dbutils.widgets.get("primary_key_col"),
     "processing_mode": dbutils.widgets.get("processing_mode"),
-    "batch_size": int(dbutils.widgets.get("batch_size")),
     "enable_delete_handling": dbutils.widgets.get("enable_delete_handling") == "true",
     "log_level": dbutils.widgets.get("log_level"),
 }
@@ -83,16 +79,16 @@ CDC_META_COLS = ["_pg_change_type", "_pg_lsn", "_pg_xid", "_timestamp", "_sort_b
 # Override or extend it here to add custom primary keys or skip entities.
 # ---------------------------------------------------------------------------
 TABLE_REGISTRY = {
-    "profile":              {"primary_keys": ["id"], "unique_business_key": "profileid"},
-    "contactpointaddress":  {"primary_keys": ["id"], "unique_business_key": "contactpointid"},
-    "contactpointemail":    {"primary_keys": ["id"], "unique_business_key": "contactpointid"},
-    "contactpointphone":    {"primary_keys": ["id"], "unique_business_key": "contactpointid"},
-    "contactpointsocial":   {"primary_keys": ["id"], "unique_business_key": "contactpointsocialid"},
-    "education":            {"primary_keys": ["id"], "unique_business_key": "educationid"},
-    "interest":             {"primary_keys": ["id"], "unique_business_key": "interestid"},
-    "preference":           {"primary_keys": ["id"], "unique_business_key": "preferenceid"},
-    "subscription":         {"primary_keys": ["id"], "unique_business_key": "subscriptionid"},
-    "alternatekey":         {"primary_keys": ["id"], "unique_business_key": "alternatekeyid"},
+    "profile":              {"primary_keys": ["id"]},
+    "contactpointaddress":  {"primary_keys": ["id"]},
+    "contactpointemail":    {"primary_keys": ["id"]},
+    "contactpointphone":    {"primary_keys": ["id"]},
+    "contactpointsocial":   {"primary_keys": ["id"]},
+    "education":            {"primary_keys": ["id"]},
+    "interest":             {"primary_keys": ["id"]},
+    "preference":           {"primary_keys": ["id"]},
+    "subscription":         {"primary_keys": ["id"]},
+    "alternatekey":         {"primary_keys": ["id"]},
 }
 
 # Build fully qualified table names
@@ -223,14 +219,16 @@ def get_entity_name(table_name, table_prefix, table_suffix):
 
 
 def get_latest_watermark(spark, target_table, lsn_col="_last_pg_lsn"):
-    """Read the max _last_pg_lsn from the target table; returns '0' if not exists."""
+    """Read the max _last_pg_lsn (LONG) from the target table; returns 0 if it
+    does not exist or is empty. Kept numeric so the incremental filter is an
+    exact LONG > LONG comparison (no string coercion / precision loss)."""
     try:
         result = spark.sql(f"SELECT MAX({lsn_col}) AS max_lsn FROM {target_table}").collect()
         val = result[0].max_lsn
-        return str(val) if val is not None else "0"
+        return int(val) if val is not None else 0
     except AnalysisException:
-        logger.info(f"Target table {target_table} does not exist yet; watermark = '0'")
-        return "0"
+        logger.info(f"Target table {target_table} does not exist yet; watermark = 0")
+        return 0
 
 
 def get_table_columns(spark, source_table, cdc_meta_cols):
@@ -280,10 +278,12 @@ def apply_cdc_merge(
     # 1. Read source CDF history table
     source_df = spark.table(source_table)
 
-    # 2. If incremental mode, filter where _pg_lsn > watermark
-    if processing_mode == "incremental" and watermark != "0":
+    # 2. If incremental mode, filter where _pg_lsn > watermark.
+    #    watermark is a LONG; F.lit(int) produces a numeric literal so this is an
+    #    exact integer comparison (both sides LONG), robust under ANSI mode.
+    if processing_mode == "incremental" and watermark and watermark > 0:
         source_df = source_df.filter(F.col(pg_lsn_col) > F.lit(watermark))
-        logger.info(f"Incremental filter applied: {pg_lsn_col} > '{watermark}'")
+        logger.info(f"Incremental filter applied: {pg_lsn_col} > {watermark}")
 
     source_count = source_df.count()
     result["rows_source"] = source_count
@@ -440,7 +440,7 @@ def run_pipeline():
         try:
             logger.info(f"Processing: {entity_name} ({source_table} → {target_table})")
 
-            watermark = "0"
+            watermark = 0
             if config["processing_mode"] == "incremental":
                 watermark = get_latest_watermark(spark, target_table)
                 logger.info(f"  Watermark for {entity_name}: {watermark}")

@@ -66,9 +66,23 @@ variables:
     default: "0 0 */2 * * ?"
 
   # Notifications
-  notification_email:
-    description: "Email address for job failure notifications (leave empty to skip)"
-    default: ""
+  # Complex variable holding the job's email_notifications block. Defaults to {}
+  # (no alerts) so the default deploy never emits a broken empty-string
+  # recipient. Enable failure alerts by overriding it under a target:
+  #
+  #   targets:
+  #     prod-scheduled:
+  #       variables:
+  #         email_notifications:
+  #           on_failure:
+  #             - alerts@company.com
+  #
+  # Note: complex variables must be set in the bundle config / target overrides
+  # — the --var CLI flag does not accept inline JSON for them.
+  email_notifications:
+    description: "Job email_notifications block; override to enable failure alerts"
+    type: complex
+    default: {}
 
 # ---------------------------------------------------------------------------
 # Include resource definitions

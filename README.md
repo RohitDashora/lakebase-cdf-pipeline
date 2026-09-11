@@ -34,7 +34,7 @@ lakebase-cdf-pipeline/
 ├── resources/
 │   └── lakebase_cdf_job.yml        # Job: task, compute, schedule, retry
 ├── src/
-│   └── lakebase_cdf_pipeline.py    # Pipeline notebook (8 cells, 15 params)
+│   └── lakebase_cdf_pipeline.py    # Pipeline notebook (8 cells, 13 params)
 ├── .github/
 │   └── workflows/
 │       └── validate.yml            # CI: lint + bundle validate on push/PR
@@ -75,7 +75,7 @@ databricks bundle run lakebase_cdf_pipeline_job --target dev
 
 The deploy command creates:
 - A notebook synced to the workspace
-- A `[dev] Lakebase CDF Pipeline` job with all 15 parameters
+- A `[dev] Lakebase CDF Pipeline` job with all 13 parameters
 - Serverless compute, schedule, retry policy, and tags
 
 ---
@@ -134,7 +134,22 @@ databricks bundle run lakebase_cdf_pipeline_job --target prod-scheduled \
 | `processing_mode`        | `incremental`                 | `incremental` (watermark) or `full` (reprocess all) |
 | `enable_delete_handling` | `true`                        | Apply DELETE CDC operations to target               |
 | `schedule_cron`          | `0 0 */2 * * ?`               | Quartz cron (schedule-based targets only)           |
-| `notification_email`     | _(empty)_                     | Email for failure alerts                            |
+| `email_notifications`    | `{}` _(no alerts)_            | Complex var; override to enable failure alerts (see below) |
+
+### Enabling Failure Alerts
+
+`email_notifications` is a complex variable holding the job's notification block. It defaults to `{}` — no alerts, and no invalid empty recipient. Enable alerts by overriding it under the target you deploy:
+
+```yaml
+targets:
+  prod-scheduled:
+    variables:
+      email_notifications:
+        on_failure:
+          - alerts@company.com
+```
+
+> **Note:** complex variables must be set in the bundle config (as above) — the `--var` CLI flag does not accept inline JSON for them.
 
 ---
 
@@ -160,7 +175,7 @@ databricks bundle run lakebase_cdf_pipeline_job --target prod-scheduled \
 1. Create the CDF history table following `{table_prefix}{entity}{table_suffix}` naming
 2. Add to `TABLE_REGISTRY` in `src/lakebase_cdf_pipeline.py`:
    ```python
-   "new_entity": {"primary_keys": ["id"], "unique_business_key": "new_entity_id"},
+   "new_entity": {"primary_keys": ["id"]},
    ```
 3. Redeploy: `databricks bundle deploy --target <target>`
 
@@ -236,10 +251,12 @@ To deploy from CI, extend the workflow with a deploy step:
 
 ```yaml
 - name: Deploy Pipeline
-  run: |
-    databricks bundle deploy --target prod-scheduled \
-      --var notification_email=${{ secrets.ALERT_EMAIL }}
+  run: databricks bundle deploy --target prod-scheduled
 ```
+
+Failure-alert recipients are configured in the target's `email_notifications`
+block in `databricks.yml` (see [Enabling Failure Alerts](#enabling-failure-alerts)),
+not via `--var`.
 
 ---
 
