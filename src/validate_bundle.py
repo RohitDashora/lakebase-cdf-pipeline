@@ -163,8 +163,13 @@ print("=" * 70)
 if failed:
     for check, _, detail in failed:
         print(f"  ✗ {check}: {detail}")
-    # Fail the job run so this acts as a native CI gate.
-    dbutils.notebook.exit(f"FAILED: {len(failed)} validation check(s) failed")
+    # Raise so the job RUN is marked FAILED — this is the CI gate.
+    # NOTE: dbutils.notebook.exit() always marks the run SUCCESS regardless of
+    # the string, so it cannot signal failure; an exception is required.
+    raise RuntimeError(
+        f"{len(failed)} validation check(s) failed: "
+        + "; ".join(check for check, _, _ in failed)
+    )
 
 print("✓ All validation checks passed.")
 dbutils.notebook.exit("SUCCESS")

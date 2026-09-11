@@ -539,9 +539,13 @@ display(comparison_df)
 
 if pipeline_success:
     print("\n✓ Pipeline completed successfully!")
+    dbutils.notebook.exit("SUCCESS")
 else:
     print("\n⚠ Pipeline completed with errors - check metrics above.")
-    # Signal failure to the job scheduler
-    dbutils.notebook.exit("FAILED")
-
-dbutils.notebook.exit("SUCCESS")
+    # Raise so the job RUN is marked FAILED, which triggers max_retries and
+    # on_failure notifications. NOTE: dbutils.notebook.exit() always marks the
+    # run SUCCESS regardless of the string, so it cannot signal failure.
+    raise RuntimeError(
+        f"Pipeline completed with {len(metrics.errors)} table error(s): "
+        + ", ".join(e["table"] for e in metrics.errors)
+    )
