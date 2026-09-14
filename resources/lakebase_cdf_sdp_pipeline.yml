@@ -1,0 +1,41 @@
+# =============================================================================
+# Lakebase CDF SDP Pipeline (Lakeflow Declarative Pipeline)
+#
+# AUTO CDC alternative to lakebase_cdf_job.yml (the notebook + Delta MERGE job).
+# Reads the same {prefix}*{suffix} CDF history tables and produces current-state
+# (SCD Type 1) Delta tables via create_auto_cdc_flow — Lakebase's
+# update_preimage/update_postimage change types are handled natively.
+#
+# Reuses the same bundle variables as the notebook job, so target-level overrides
+# in databricks.yml apply here too.
+#
+#   databricks bundle deploy --target <target>
+#   databricks bundle run lakebase_cdf_sdp_pipeline --target <target>
+# =============================================================================
+
+resources:
+  pipelines:
+    lakebase_cdf_sdp_pipeline:
+      name: "[${bundle.target}] Lakebase CDF SDP Pipeline"
+      serverless: true
+
+      # Default target catalog/schema for the current-state tables. The SDP code
+      # also writes fully-qualified names from the same variables.
+      catalog: ${var.target_catalog}
+      schema: ${var.target_schema}
+
+      # Wire bundle variables into the pipeline so the SDP code can read them via
+      # spark.conf.get(...). Mirrors the notebook job's base_parameters.
+      configuration:
+        source_catalog: ${var.source_catalog}
+        source_schema: ${var.source_schema}
+        target_catalog: ${var.target_catalog}
+        target_schema: ${var.target_schema}
+        table_prefix: ${var.table_prefix}
+        table_suffix: ${var.table_suffix}
+        primary_key_col: ${var.primary_key_col}
+
+      # Only the SDP source file under src/sdp/ — NOT the notebooks in src/.
+      libraries:
+        - glob:
+            include: src/sdp/**
