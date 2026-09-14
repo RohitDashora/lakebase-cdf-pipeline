@@ -345,8 +345,11 @@ def apply_cdc_merge(
     )
 
     # 4. Split into upserts and deletes
-    # Support both full-word (Lakebase CDF) and single-letter (PG logical replication) types
-    upsert_types = ["I", "U", "c", "u", "insert", "update"]
+    # Support both full-word (Lakebase CDF) and single-letter (PG logical replication) types.
+    # Lakebase Lakehouse Sync emits `update_postimage` (the new row image) and
+    # `update_preimage` (the old image) for updates — the postimage is the current
+    # state and MUST be treated as an upsert; the preimage is intentionally ignored.
+    upsert_types = ["I", "U", "c", "u", "insert", "update", "update_postimage"]
     delete_types = ["D", "d", "delete"]
 
     upserts_df = deduped_df.filter(F.col(pg_change_type_col).isin(upsert_types))
