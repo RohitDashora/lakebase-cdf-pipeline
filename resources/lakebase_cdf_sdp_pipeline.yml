@@ -7,7 +7,16 @@
 # update_preimage/update_postimage change types are handled natively.
 #
 # Reuses the same bundle variables as the notebook job, so target-level overrides
-# in databricks.yml apply here too.
+# in databricks.yml apply here too — identical config surface (same parameters),
+# deployed as a separate resource. The notebook job is NOT replaced; both ship.
+#
+# COEXISTENCE — pick ONE per target schema. This pipeline and the notebook job
+# build the SAME current-state tables (${var.target_catalog}.${var.target_schema}.<entity>)
+# by different mechanisms: the SDP creates pipeline-MANAGED streaming tables, while
+# the notebook writes plain Delta via MERGE. A given table can only be one of those.
+# `bundle deploy` creates both resources (harmless — neither auto-runs), but do NOT
+# RUN both against the same target schema, or they will fight over the same tables.
+# To run them side by side, point one at a different target_schema.
 #
 #   databricks bundle deploy --target <target>
 #   databricks bundle run lakebase_cdf_sdp_pipeline --target <target>
